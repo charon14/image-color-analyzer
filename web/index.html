@@ -1,0 +1,536 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Milo Color Analyzer</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="page">
+      <nav class="top-nav">
+        <a href="/index.html" aria-current="page">单图分析</a>
+        <a href="/collection.html">组图风格分析</a>
+      </nav>
+
+      <section class="hero">
+        <p class="eyebrow">Color Analysis Web App</p>
+        <h1>Milo Color Analyzer</h1>
+        <p class="intro">支持批量上传。每张图片都会生成独立的图表项，而不是拼成一张总图，上传后页面会立即显示已选文件和分析进度。</p>
+      </section>
+
+      <section class="panel upload-panel">
+        <label class="upload-box" for="image-input">
+          <input id="image-input" type="file" accept="image/jpeg,image/png,image/webp" multiple>
+          <span>选择图片</span>
+          <small>支持批量选择 JPG / PNG / WEBP</small>
+        </label>
+        <button id="analyze-button" type="button">开始分析</button>
+        <p id="status" class="status">等待上传</p>
+        <div id="selection" class="selection empty">尚未选择文件</div>
+      </section>
+
+      <section id="results" class="results hidden"></section>
+    </main>
+
+    <div id="lightbox" class="lightbox hidden" role="dialog" aria-modal="true" aria-label="图表放大预览">
+      <button id="lightbox-close" class="lightbox-close" type="button" aria-label="关闭预览">关闭</button>
+      <div id="lightbox-status" class="lightbox-status">正在加载高清图…</div>
+      <img id="lightbox-image" alt="放大图表预览">
+      <div id="lightbox-lab" class="lightbox-lab hidden"></div>
+    </div>
+
+    <template id="result-template">
+      <article class="result-card panel">
+        <div class="row-title">
+          <h2 class="result-title"></h2>
+          <div class="swatch"></div>
+        </div>
+        <div class="metrics compact-metrics"></div>
+        <div class="result-table"></div>
+      </article>
+    </template>
+
+    <script>
+      const input = document.getElementById("image-input");
+      const button = document.getElementById("analyze-button");
+      const statusEl = document.getElementById("status");
+      const selectionEl = document.getElementById("selection");
+      const resultsEl = document.getElementById("results");
+      const template = document.getElementById("result-template");
+      const lightboxEl = document.getElementById("lightbox");
+      const lightboxImageEl = document.getElementById("lightbox-image");
+      const lightboxCloseEl = document.getElementById("lightbox-close");
+      const lightboxStatusEl = document.getElementById("lightbox-status");
+      const lightboxLabEl = document.getElementById("lightbox-lab");
+      let lightboxRequestToken = 0;
+
+      function setStatus(message, isError = false) {
+        statusEl.textContent = message;
+        statusEl.dataset.error = isError ? "true" : "false";
+      }
+
+      function fileToDataUrl(file) {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = () => reject(new Error(`读取 ${file.name} 失败`));
+          reader.readAsDataURL(file);
+        });
+      }
+
+      function renderSelection(files) {
+        if (!files.length) {
+          selectionEl.className = "selection empty";
+          selectionEl.textContent = "尚未选择文件";
+          return;
+        }
+
+        selectionEl.className = "selection";
+        selectionEl.innerHTML = files.map((file) => `
+          <span class="file-chip">${file.name}</span>
+        `).join("");
+      }
+
+      function renderMetrics(container, summary) {
+        const entries = [
+          ["平均亮度", summary.mean_brightness],
+          ["平均饱和度", summary.mean_saturation],
+          ["平均色相", `${summary.mean_hue}°`],
+          ["平均颜色", summary.average_color],
+          ["像素数", summary.pixel_count]
+        ];
+
+        container.innerHTML = entries.map(([label, value]) => `
+          <div class="metric">
+            <span>${label}</span>
+            <strong>${value}</strong>
+          </div>
+        `).join("");
+      }
+
+      function createLabPanelMarkup() {
+        return `
+          <section class="lab-panel panel inner-panel is-modal">
+            <div class="lab-header">
+              <div>
+                <h3>Interactive 3D LAB Model</h3>
+                <p class="lab-copy">Each sampled pixel occupies a real position in L/a/b space. Drag inside the model to rotate the point cloud.</p>
+              </div>
+              <div class="lab-controls">
+                <button class="lab-view-button" type="button">俯视</button>
+                <label class="lab-zoom">
+                  <span>Zoom</span>
+                  <input class="lab-zoom-input" type="range" min="0.8" max="2.4" step="0.1" value="1.2">
+                </label>
+              </div>
+            </div>
+            <div class="lab-stage">
+              <svg class="lab-svg" viewBox="0 0 420 420" aria-label="Interactive LAB color model"></svg>
+              <div class="lab-tooltip hidden"></div>
+            </div>
+          </section>
+        `;
+      }
+
+      function renderEntryTable(container, originalChart, charts) {
+        const entries = [
+          { type: "image", title: originalChart?.title || "Original", image: originalChart?.image || "", full: originalChart?.full_url || originalChart?.image || "" },
+          { type: "lab", title: "3D LAB Model" },
+          ...charts.map((chart) => ({ type: "image", title: chart.title, image: chart.image, full: chart.full_url || chart.image }))
+        ];
+
+        container.innerHTML = entries.map((entry) => `
+          <button class="entry-tile ${entry.type === "lab" ? "lab-entry-tile" : ""}" type="button" data-entry-type="${entry.type}" data-title="${entry.title}" data-image="${entry.full || ""}">
+            ${entry.type === "lab" ? `<div class="entry-lab-badge">LAB</div>` : `<img src="${entry.image}" alt="${entry.title}" loading="lazy">`}
+            <span>${entry.title}</span>
+          </button>
+        `).join("");
+      }
+
+      function renderLabModel(section, labModel) {
+        const svg = section.querySelector(".lab-svg");
+        const tooltip = section.querySelector(".lab-tooltip");
+        const zoomInput = section.querySelector(".lab-zoom-input");
+        const topViewButton = section.querySelector(".lab-view-button");
+        const size = 420;
+        const center = size / 2;
+        const abRange = labModel.ab_range || 110;
+        const lMin = (labModel.l_range || [0, 100])[0];
+        const lMax = (labModel.l_range || [0, 100])[1];
+        const points = labModel.points || [];
+        const state = {
+          rotateX: 18,
+          rotateY: -35,
+          isDragging: false,
+          lastX: 0,
+          lastY: 0
+        };
+
+        function degToRad(value) {
+          return (value * Math.PI) / 180;
+        }
+
+        function normalize(point) {
+          return {
+            x: point.b / abRange,
+            y: (point.l - lMin) / (lMax - lMin) * 2 - 1,
+            z: point.a / abRange,
+            color: point.color,
+            l: point.l,
+            a: point.a,
+            b: point.b
+          };
+        }
+
+        function rotate(point, rx, ry) {
+          const cosY = Math.cos(ry);
+          const sinY = Math.sin(ry);
+          const cosX = Math.cos(rx);
+          const sinX = Math.sin(rx);
+
+          const x1 = point.x * cosY + point.z * sinY;
+          const z1 = -point.x * sinY + point.z * cosY;
+          const y1 = point.y * cosX - z1 * sinX;
+          const z2 = point.y * sinX + z1 * cosX;
+
+          return { ...point, x: x1, y: y1, z: z2 };
+        }
+
+        function projectPoint(point, zoom) {
+          const perspective = 1 / (1 + (point.z + 1.4) * 0.45);
+          return {
+            ...point,
+            sx: center + point.x * 150 * zoom * perspective,
+            sy: center - point.y * 150 * zoom * perspective,
+            radius: Math.max(1.2, 2.4 * perspective),
+            alpha: Math.max(0.22, Math.min(0.92, 0.3 + perspective * 0.7))
+          };
+        }
+
+        function projectAxis(point, rx, ry, zoom) {
+          return projectPoint(
+            rotate(
+              {
+                x: point.x,
+                y: point.y,
+                z: point.z,
+                color: "#ffffff",
+                l: 0,
+                a: 0,
+                b: 0
+              },
+              rx,
+              ry
+            ),
+            zoom
+          );
+        }
+
+        function draw() {
+          const rx = degToRad(state.rotateX);
+          const ry = degToRad(state.rotateY);
+          const zoom = Number(zoomInput.value);
+
+          const projected = points
+            .map(normalize)
+            .map((point) => rotate(point, rx, ry))
+            .map((point) => projectPoint(point, zoom))
+            .sort((left, right) => right.z - left.z);
+
+          const origin = projectAxis({ x: 0, y: 0, z: 0 }, rx, ry, zoom);
+          const axisBPos = projectAxis({ x: 1, y: 0, z: 0 }, rx, ry, zoom);
+          const axisBNeg = projectAxis({ x: -1, y: 0, z: 0 }, rx, ry, zoom);
+          const axisLPos = projectAxis({ x: 0, y: 1, z: 0 }, rx, ry, zoom);
+          const axisLNeg = projectAxis({ x: 0, y: -1, z: 0 }, rx, ry, zoom);
+          const axisAPos = projectAxis({ x: 0, y: 0, z: 1 }, rx, ry, zoom);
+          const axisANeg = projectAxis({ x: 0, y: 0, z: -1 }, rx, ry, zoom);
+          const planeBL = [
+            projectAxis({ x: -1, y: -1, z: 0 }, rx, ry, zoom),
+            projectAxis({ x: 1, y: -1, z: 0 }, rx, ry, zoom),
+            projectAxis({ x: 1, y: 1, z: 0 }, rx, ry, zoom),
+            projectAxis({ x: -1, y: 1, z: 0 }, rx, ry, zoom)
+          ];
+          const planeAL = [
+            projectAxis({ x: 0, y: -1, z: -1 }, rx, ry, zoom),
+            projectAxis({ x: 0, y: -1, z: 1 }, rx, ry, zoom),
+            projectAxis({ x: 0, y: 1, z: 1 }, rx, ry, zoom),
+            projectAxis({ x: 0, y: 1, z: -1 }, rx, ry, zoom)
+          ];
+          const planeAB = [
+            projectAxis({ x: -1, y: 0, z: -1 }, rx, ry, zoom),
+            projectAxis({ x: 1, y: 0, z: -1 }, rx, ry, zoom),
+            projectAxis({ x: 1, y: 0, z: 1 }, rx, ry, zoom),
+            projectAxis({ x: -1, y: 0, z: 1 }, rx, ry, zoom)
+          ];
+
+          const planePoints = (points) => points.map((point) => `${point.sx.toFixed(2)},${point.sy.toFixed(2)}`).join(" ");
+
+          const circles = projected.map((point) => `
+            <circle
+              cx="${point.sx.toFixed(2)}"
+              cy="${point.sy.toFixed(2)}"
+              r="${point.radius.toFixed(2)}"
+              fill="${point.color}"
+              fill-opacity="${point.alpha.toFixed(2)}"
+              data-l="${point.l}"
+              data-a="${point.a}"
+              data-b="${point.b}"
+              data-color="${point.color}"
+            ></circle>
+          `).join("");
+
+          svg.innerHTML = `
+            <rect x="0" y="0" width="${size}" height="${size}" rx="18" fill="#131313"></rect>
+            <polygon points="${planePoints(planeBL)}" fill="rgba(245,212,110,0.028)" stroke="rgba(245,212,110,0.08)" stroke-width="0.6"></polygon>
+            <polygon points="${planePoints(planeAL)}" fill="rgba(255,159,159,0.025)" stroke="rgba(255,159,159,0.08)" stroke-width="0.6"></polygon>
+            <polygon points="${planePoints(planeAB)}" fill="rgba(246,242,234,0.018)" stroke="rgba(246,242,234,0.065)" stroke-width="0.6"></polygon>
+            <line x1="${origin.sx.toFixed(2)}" y1="${origin.sy.toFixed(2)}" x2="${axisBPos.sx.toFixed(2)}" y2="${axisBPos.sy.toFixed(2)}" stroke="rgba(245,212,110,0.45)" stroke-width="0.85"></line>
+            <line x1="${origin.sx.toFixed(2)}" y1="${origin.sy.toFixed(2)}" x2="${axisBNeg.sx.toFixed(2)}" y2="${axisBNeg.sy.toFixed(2)}" stroke="rgba(140,184,255,0.42)" stroke-width="0.85"></line>
+            <line x1="${origin.sx.toFixed(2)}" y1="${origin.sy.toFixed(2)}" x2="${axisLPos.sx.toFixed(2)}" y2="${axisLPos.sy.toFixed(2)}" stroke="rgba(246,242,234,0.46)" stroke-width="0.85"></line>
+            <line x1="${origin.sx.toFixed(2)}" y1="${origin.sy.toFixed(2)}" x2="${axisLNeg.sx.toFixed(2)}" y2="${axisLNeg.sy.toFixed(2)}" stroke="rgba(246,242,234,0.22)" stroke-width="0.75"></line>
+            <line x1="${origin.sx.toFixed(2)}" y1="${origin.sy.toFixed(2)}" x2="${axisAPos.sx.toFixed(2)}" y2="${axisAPos.sy.toFixed(2)}" stroke="rgba(255,159,159,0.42)" stroke-width="0.85"></line>
+            <line x1="${origin.sx.toFixed(2)}" y1="${origin.sy.toFixed(2)}" x2="${axisANeg.sx.toFixed(2)}" y2="${axisANeg.sy.toFixed(2)}" stroke="rgba(149,240,163,0.4)" stroke-width="0.85"></line>
+            <circle cx="${origin.sx.toFixed(2)}" cy="${origin.sy.toFixed(2)}" r="2.6" fill="#ffffff" fill-opacity="0.56"></circle>
+            <text class="lab-axis-label" x="${(axisBPos.sx + 8).toFixed(2)}" y="${(axisBPos.sy - 8).toFixed(2)}" fill="#f5d46e" font-size="10">+B</text>
+            <text class="lab-axis-label" x="${(axisBNeg.sx + 8).toFixed(2)}" y="${(axisBNeg.sy - 8).toFixed(2)}" fill="#8cb8ff" font-size="10">-B</text>
+            <text class="lab-axis-label" x="${(axisLPos.sx + 8).toFixed(2)}" y="${(axisLPos.sy - 8).toFixed(2)}" fill="#f6f2ea" font-size="10">+L</text>
+            <text class="lab-axis-label" x="${(axisAPos.sx + 8).toFixed(2)}" y="${(axisAPos.sy - 8).toFixed(2)}" fill="#ff9f9f" font-size="10">+A</text>
+            <text class="lab-axis-label" x="${(axisANeg.sx + 8).toFixed(2)}" y="${(axisANeg.sy - 8).toFixed(2)}" fill="#95f0a3" font-size="10">-A</text>
+            ${circles}
+          `;
+        }
+
+        draw();
+
+        zoomInput.addEventListener("input", () => {
+          draw();
+          tooltip.classList.add("hidden");
+        });
+
+        svg.addEventListener("pointermove", (event) => {
+          if (state.isDragging) {
+            const deltaX = event.clientX - state.lastX;
+            const deltaY = event.clientY - state.lastY;
+            state.rotateY -= deltaX * 0.45;
+            state.rotateX = Math.max(-89, Math.min(89, state.rotateX - deltaY * 0.35));
+            state.lastX = event.clientX;
+            state.lastY = event.clientY;
+            draw();
+            tooltip.classList.add("hidden");
+            return;
+          }
+
+          const point = event.target.closest("circle");
+          if (!point) {
+            tooltip.classList.add("hidden");
+            return;
+          }
+
+          const rect = section.querySelector(".lab-stage").getBoundingClientRect();
+          tooltip.innerHTML = `
+            <span>${point.dataset.color}</span>
+            <strong>L ${point.dataset.l} / A ${point.dataset.a} / B ${point.dataset.b}</strong>
+          `;
+          tooltip.style.left = `${event.clientX - rect.left + 12}px`;
+          tooltip.style.top = `${event.clientY - rect.top + 12}px`;
+          tooltip.classList.remove("hidden");
+        });
+
+        svg.addEventListener("pointerleave", () => {
+          tooltip.classList.add("hidden");
+        });
+
+        svg.addEventListener("pointerdown", (event) => {
+          state.isDragging = true;
+          state.lastX = event.clientX;
+          state.lastY = event.clientY;
+          tooltip.classList.add("hidden");
+          svg.setPointerCapture(event.pointerId);
+        });
+
+        svg.addEventListener("pointerup", (event) => {
+          state.isDragging = false;
+          svg.releasePointerCapture(event.pointerId);
+        });
+
+        svg.addEventListener("pointercancel", () => {
+          state.isDragging = false;
+        });
+
+        topViewButton.addEventListener("click", () => {
+          state.rotateX = -90;
+          state.rotateY = 0;
+          draw();
+          tooltip.classList.add("hidden");
+        });
+      }
+
+      function renderResults(results) {
+        resultsEl.innerHTML = "";
+
+        for (const result of results) {
+          const fragment = template.content.cloneNode(true);
+          const originalChart = result.charts.find((chart) => chart.id === "original");
+          const otherCharts = result.charts.filter((chart) => chart.id !== "original");
+          fragment.querySelector(".result-title").textContent = result.filename;
+          fragment.querySelector(".swatch").style.background = result.summary.average_color;
+          fragment.querySelector(".result-table").dataset.labModel = JSON.stringify(result.lab_model);
+          renderMetrics(fragment.querySelector(".metrics"), result.summary);
+          renderEntryTable(fragment.querySelector(".result-table"), originalChart, otherCharts);
+          resultsEl.appendChild(fragment);
+        }
+
+        resultsEl.classList.remove("hidden");
+      }
+
+      function openLightbox(title, image, previewImage) {
+        const token = ++lightboxRequestToken;
+        lightboxImageEl.alt = title;
+        lightboxImageEl.src = previewImage || "";
+        lightboxImageEl.classList.remove("hidden");
+        lightboxLabEl.classList.add("hidden");
+        lightboxLabEl.innerHTML = "";
+        lightboxEl.classList.remove("hidden");
+        document.body.classList.add("is-locked");
+        lightboxEl.dataset.loading = "true";
+        lightboxStatusEl.textContent = "正在加载高清图…";
+
+        const loader = new Image();
+        loader.onload = () => {
+          if (token !== lightboxRequestToken) {
+            return;
+          }
+          lightboxImageEl.src = image;
+          lightboxEl.dataset.loading = "false";
+        };
+        loader.onerror = () => {
+          if (token !== lightboxRequestToken) {
+            return;
+          }
+          lightboxEl.dataset.loading = "false";
+          lightboxStatusEl.textContent = "高清图加载失败，当前显示预览图";
+        };
+        loader.src = image;
+      }
+
+      function closeLightbox() {
+        lightboxRequestToken += 1;
+        lightboxEl.classList.add("hidden");
+        lightboxEl.dataset.loading = "false";
+        lightboxImageEl.src = "";
+        lightboxImageEl.classList.remove("hidden");
+        lightboxLabEl.innerHTML = "";
+        lightboxLabEl.classList.add("hidden");
+        document.body.classList.remove("is-locked");
+      }
+
+      function openLabLightbox(labModel) {
+        lightboxRequestToken += 1;
+        lightboxEl.classList.remove("hidden");
+        document.body.classList.add("is-locked");
+        lightboxEl.dataset.loading = "false";
+        lightboxImageEl.classList.add("hidden");
+        lightboxImageEl.src = "";
+        lightboxLabEl.innerHTML = createLabPanelMarkup();
+        lightboxLabEl.classList.remove("hidden");
+        renderLabModel(lightboxLabEl.querySelector(".lab-panel"), labModel);
+      }
+
+      input.addEventListener("change", () => {
+        const files = Array.from(input.files || []);
+        renderSelection(files);
+        if (files.length) {
+          setStatus(`已选择 ${files.length} 个文件，等待开始分析`);
+        } else {
+          setStatus("等待上传");
+        }
+      });
+
+      button.addEventListener("click", async () => {
+        const files = Array.from(input.files || []);
+        if (!files.length) {
+          setStatus("请先选择至少一张图片", true);
+          return;
+        }
+
+        try {
+          button.disabled = true;
+          resultsEl.classList.add("hidden");
+          resultsEl.innerHTML = "";
+          setStatus(`正在读取 ${files.length} 个文件…`);
+
+          const images = [];
+          for (let index = 0; index < files.length; index += 1) {
+            const file = files[index];
+            setStatus(`正在准备上传 ${index + 1}/${files.length}: ${file.name}`);
+            images.push({
+              filename: file.name,
+              data_url: await fileToDataUrl(file)
+            });
+          }
+
+          setStatus(`正在分析 ${files.length} 个文件…`);
+          const response = await fetch("/analyze", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ images })
+          });
+
+          const payload = await response.json();
+          if (!response.ok) {
+            throw new Error(payload.error || "分析失败");
+          }
+
+          renderResults(payload.results || []);
+          setStatus(`分析完成，共处理 ${payload.results.length} 个文件`);
+        } catch (error) {
+          setStatus(error.message || "分析失败", true);
+        } finally {
+          button.disabled = false;
+        }
+      });
+
+      resultsEl.addEventListener("click", (event) => {
+        const entryTile = event.target.closest(".entry-tile");
+        if (entryTile) {
+          if (entryTile.dataset.entryType === "lab") {
+            const labModel = JSON.parse(entryTile.closest(".result-table").dataset.labModel);
+            openLabLightbox(labModel);
+            return;
+          }
+          const previewImage = entryTile.querySelector("img")?.src || "";
+          openLightbox(
+            entryTile.dataset.title || "图表预览",
+            entryTile.dataset.image || "",
+            previewImage
+          );
+          return;
+        }
+        const buttonEl = event.target.closest(".chart-button");
+        if (!buttonEl) {
+          return;
+        }
+        const previewImage = buttonEl.querySelector("img")?.src || "";
+        openLightbox(
+          buttonEl.dataset.title || "图表预览",
+          buttonEl.dataset.image || "",
+          previewImage
+        );
+      });
+
+      lightboxCloseEl.addEventListener("click", closeLightbox);
+      lightboxEl.addEventListener("click", (event) => {
+        if (event.target === lightboxEl) {
+          closeLightbox();
+        }
+      });
+
+      document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && !lightboxEl.classList.contains("hidden")) {
+          closeLightbox();
+        }
+      });
+    </script>
+  </body>
+</html>

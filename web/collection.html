@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Collection Style Analyzer</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="page">
+      <nav class="top-nav">
+        <a href="/index.html">单图分析</a>
+        <a href="/collection.html" aria-current="page">组图风格分析</a>
+      </nav>
+
+      <section class="hero">
+        <p class="eyebrow">Collection Style Analyzer</p>
+        <h1>Analyze A Whole Folder</h1>
+        <p class="intro">上传一个包含同风格作品的文件夹，系统会聚合整组图像的亮度、色相、饱和度和综合色彩，给出整体视觉风格结论。</p>
+      </section>
+
+      <section class="panel upload-panel">
+        <label class="upload-box" for="folder-input">
+          <input id="folder-input" type="file" webkitdirectory directory multiple accept="image/jpeg,image/png,image/webp">
+          <span>选择文件夹</span>
+          <small>上传一整个作品目录，自动过滤 JPG / PNG / WEBP</small>
+        </label>
+        <button id="collection-button" type="button">开始组分析</button>
+        <p id="collection-status" class="status">等待上传文件夹</p>
+        <div id="collection-selection" class="selection empty">尚未选择文件夹</div>
+      </section>
+
+      <section id="collection-result" class="results hidden">
+        <article class="panel collection-summary-card">
+          <div class="collection-head">
+            <div>
+              <h2>整体风格</h2>
+              <p id="collection-summary" class="collection-summary"></p>
+            </div>
+            <div id="collection-swatch" class="swatch"></div>
+          </div>
+          <div id="collection-tags" class="tag-list"></div>
+          <div id="collection-metrics" class="metrics"></div>
+        </article>
+
+        <article class="panel collection-grid-card">
+          <h2>算法分析</h2>
+          <div class="collection-analysis-grid">
+            <section class="analysis-block">
+              <h3>Lab 主轴</h3>
+              <p id="collection-lab-signature"></p>
+            </section>
+            <section class="analysis-block">
+              <h3>色相和谐</h3>
+              <p id="collection-harmony"></p>
+            </section>
+            <section class="analysis-block">
+              <h3>明度分层</h3>
+              <p id="collection-layers"></p>
+            </section>
+            <section class="analysis-block">
+              <h3>对比度</h3>
+              <p id="collection-contrast"></p>
+            </section>
+            <section class="analysis-block">
+              <h3>情绪坐标</h3>
+              <p id="collection-mood"></p>
+            </section>
+            <section class="analysis-block">
+              <h3>组内一致性</h3>
+              <p id="collection-fingerprint"></p>
+            </section>
+          </div>
+        </article>
+
+        <article class="panel collection-grid-card">
+          <h2>九宫格空间色彩</h2>
+          <div id="collection-spatial" class="spatial-grid"></div>
+        </article>
+
+        <article class="panel collection-grid-card">
+          <h2>可视化图表</h2>
+          <div id="collection-charts" class="collection-chart-grid"></div>
+        </article>
+
+        <article class="panel collection-grid-card">
+          <h2>样本概览</h2>
+          <div id="collection-grid" class="collection-grid"></div>
+        </article>
+      </section>
+    </main>
+
+    <div id="collection-lightbox" class="lightbox hidden" role="dialog" aria-modal="true" aria-label="图表放大预览">
+      <button id="collection-lightbox-close" class="lightbox-close" type="button" aria-label="关闭预览">关闭</button>
+      <div id="collection-lightbox-status" class="lightbox-status">正在加载高清图…</div>
+      <img id="collection-lightbox-image" alt="组图放大预览">
+    </div>
+
+    <script>
+      const input = document.getElementById("folder-input");
+      const button = document.getElementById("collection-button");
+      const statusEl = document.getElementById("collection-status");
+      const selectionEl = document.getElementById("collection-selection");
+      const resultEl = document.getElementById("collection-result");
+      const summaryEl = document.getElementById("collection-summary");
+      const swatchEl = document.getElementById("collection-swatch");
+      const tagsEl = document.getElementById("collection-tags");
+      const metricsEl = document.getElementById("collection-metrics");
+      const gridEl = document.getElementById("collection-grid");
+      const labSignatureEl = document.getElementById("collection-lab-signature");
+      const harmonyEl = document.getElementById("collection-harmony");
+      const layersEl = document.getElementById("collection-layers");
+      const contrastEl = document.getElementById("collection-contrast");
+      const moodEl = document.getElementById("collection-mood");
+      const fingerprintEl = document.getElementById("collection-fingerprint");
+      const spatialEl = document.getElementById("collection-spatial");
+      const chartsEl = document.getElementById("collection-charts");
+      const lightboxEl = document.getElementById("collection-lightbox");
+      const lightboxImageEl = document.getElementById("collection-lightbox-image");
+      const lightboxStatusEl = document.getElementById("collection-lightbox-status");
+      const lightboxCloseEl = document.getElementById("collection-lightbox-close");
+      let lightboxRequestToken = 0;
+
+      function setStatus(message, isError = false) {
+        statusEl.textContent = message;
+        statusEl.dataset.error = isError ? "true" : "false";
+      }
+
+      function fileToDataUrl(file) {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = () => reject(new Error(`读取 ${file.name} 失败`));
+          reader.readAsDataURL(file);
+        });
+      }
+
+      function renderSelection(files) {
+        if (!files.length) {
+          selectionEl.className = "selection empty";
+          selectionEl.textContent = "尚未选择文件夹";
+          return;
+        }
+        selectionEl.className = "selection";
+        selectionEl.innerHTML = files.slice(0, 12).map((file) => `<span class="file-chip">${file.webkitRelativePath || file.name}</span>`).join("");
+      }
+
+      function renderMetrics(metrics) {
+        const entries = [
+          ["组平均亮度", metrics.mean_brightness],
+          ["组平均饱和度", metrics.mean_saturation],
+          ["组平均色相", `${metrics.mean_hue}°`],
+          ["亮度范围", `${metrics.brightness_range[0]} - ${metrics.brightness_range[1]}`],
+          ["饱和度范围", `${metrics.saturation_range[0]} - ${metrics.saturation_range[1]}`],
+          ["综合色", metrics.average_color]
+        ];
+        metricsEl.innerHTML = entries.map(([label, value]) => `
+          <div class="metric">
+            <span>${label}</span>
+            <strong>${value}</strong>
+          </div>
+        `).join("");
+      }
+
+      function renderImages(images) {
+        gridEl.innerHTML = images.map((item) => `
+          <article class="collection-tile">
+            <img src="${item.preview_image}" alt="${item.filename}" loading="lazy">
+            <div class="collection-tile-meta">
+              <strong>${item.filename}</strong>
+              <span>Brightness ${item.mean_brightness} / Saturation ${item.mean_saturation}</span>
+            </div>
+          </article>
+        `).join("");
+      }
+
+      function renderSpatialPalette(cells) {
+        spatialEl.innerHTML = cells.map((cell) => `
+          <div class="spatial-cell" style="background:${cell.color}">
+            <span>${cell.row + 1}-${cell.col + 1}</span>
+            <strong>${cell.color}</strong>
+          </div>
+        `).join("");
+      }
+
+      function renderCollectionCharts(charts) {
+        chartsEl.innerHTML = charts.map((chart) => `
+          <article class="collection-chart-card">
+            <h3>${chart.title}</h3>
+            <button
+              class="chart-button"
+              type="button"
+              data-title="${chart.title}"
+              data-image="${chart.full_image || chart.image}"
+            >
+              <img src="${chart.image}" alt="${chart.title}" loading="lazy">
+            </button>
+          </article>
+        `).join("");
+      }
+
+      function openLightbox(title, image, previewImage) {
+        const token = ++lightboxRequestToken;
+        lightboxImageEl.alt = title;
+        lightboxImageEl.src = previewImage || "";
+        lightboxEl.classList.remove("hidden");
+        document.body.classList.add("is-locked");
+        lightboxEl.dataset.loading = "true";
+        lightboxStatusEl.textContent = "正在加载高清图…";
+
+        const loader = new Image();
+        loader.onload = () => {
+          if (token !== lightboxRequestToken) {
+            return;
+          }
+          lightboxImageEl.src = image;
+          lightboxEl.dataset.loading = "false";
+        };
+        loader.onerror = () => {
+          if (token !== lightboxRequestToken) {
+            return;
+          }
+          lightboxEl.dataset.loading = "false";
+          lightboxStatusEl.textContent = "高清图加载失败，当前显示预览图";
+        };
+        loader.src = image;
+      }
+
+      function closeLightbox() {
+        lightboxRequestToken += 1;
+        lightboxEl.classList.add("hidden");
+        lightboxEl.dataset.loading = "false";
+        lightboxImageEl.src = "";
+        document.body.classList.remove("is-locked");
+      }
+
+      input.addEventListener("change", () => {
+        const files = Array.from(input.files || []).filter((file) => file.type.startsWith("image/"));
+        renderSelection(files);
+        setStatus(files.length ? `已选择 ${files.length} 张图片，等待开始分析` : "等待上传文件夹");
+      });
+
+      button.addEventListener("click", async () => {
+        const files = Array.from(input.files || []).filter((file) => file.type.startsWith("image/"));
+        if (!files.length) {
+          setStatus("请先选择一个包含图片的文件夹", true);
+          return;
+        }
+
+        try {
+          button.disabled = true;
+          resultEl.classList.add("hidden");
+          setStatus(`正在准备 ${files.length} 张图片…`);
+          const images = [];
+          for (let index = 0; index < files.length; index += 1) {
+            const file = files[index];
+            setStatus(`正在读取 ${index + 1}/${files.length}: ${file.name}`);
+            images.push({
+              filename: file.webkitRelativePath || file.name,
+              data_url: await fileToDataUrl(file)
+            });
+          }
+
+          setStatus("正在聚合整组风格…");
+          const response = await fetch("/analyze-collection", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ images })
+          });
+          const payload = await response.json();
+          if (!response.ok) {
+            throw new Error(payload.error || "组分析失败");
+          }
+
+          summaryEl.textContent = payload.collection_summary;
+          swatchEl.style.background = payload.group_metrics.average_color;
+          tagsEl.innerHTML = payload.style_tags.map((tag) => `<span class="style-tag">${tag}</span>`).join("");
+          renderMetrics(payload.group_metrics);
+          labSignatureEl.textContent = `主轴角度 ${payload.lab_signature.axis_angle}°，方差占比 ${Math.round(payload.lab_signature.axis_strength * 100)}%。`;
+          harmonyEl.textContent = `${payload.harmony.harmony_type} harmony，主色相集中在 ${payload.harmony.dominant_hues.join("° / ")}°。`;
+          layersEl.textContent = `阴影 ${payload.luminance_layers.shadow.bias}，中间调 ${payload.luminance_layers.midtone.bias}，高光 ${payload.luminance_layers.highlight.bias}。`;
+          contrastEl.textContent = `空间对比 ${payload.contrast.spatial_contrast}，色彩对比 ΔE ${payload.contrast.color_contrast}。`;
+          moodEl.textContent = `暖冷 ${payload.mood.warmth}，饱和度 ${payload.mood.saturation}，亮度 ${payload.mood.brightness}。`;
+          fingerprintEl.textContent = `组内一致性 ${Math.round(payload.fingerprint.cohesion * 100)}%。`;
+          renderSpatialPalette(payload.spatial_palette);
+          renderCollectionCharts(payload.charts || []);
+          renderImages(payload.images);
+          resultEl.classList.remove("hidden");
+          setStatus(`分析完成，共处理 ${payload.image_count} 张图片`);
+        } catch (error) {
+          setStatus(error.message || "组分析失败", true);
+        } finally {
+          button.disabled = false;
+        }
+      });
+
+      chartsEl.addEventListener("click", (event) => {
+        const buttonEl = event.target.closest(".chart-button");
+        if (!buttonEl) {
+          return;
+        }
+        const previewImage = buttonEl.querySelector("img")?.src || "";
+        openLightbox(
+          buttonEl.dataset.title || "图表预览",
+          buttonEl.dataset.image || previewImage,
+          previewImage
+        );
+      });
+
+      lightboxCloseEl.addEventListener("click", closeLightbox);
+      lightboxEl.addEventListener("click", (event) => {
+        if (event.target === lightboxEl) {
+          closeLightbox();
+        }
+      });
+
+      document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && !lightboxEl.classList.contains("hidden")) {
+          closeLightbox();
+        }
+      });
+    </script>
+  </body>
+</html>
