@@ -144,4 +144,4 @@ python3 -m py_compile color_analysis.py
 
 ## License
 
-如需开源发布，建议后续补充正式许可证文件。
+本项目采用 MIT License，详见 [LICENSE](/Users/marat/Documents/6-CODE/COLOR/LICENSE)。

@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 .mplconfig/
 images/analysis_output/
+.vscode/
